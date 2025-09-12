@@ -1,0 +1,21 @@
+/node_modules
+/packages/client-admin/node_modules
+/packages/client-pwa/node_modules
+/packages/server/node_modules
+
+Production build folders
+/packages/client-admin/build
+/packages/client-pwa/build
+
+Local upload folder (we will use cloud storage in production)
+/packages/server/uploads
+
+Log files
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+
+Environment variables file (VERY IMPORTANT for security)
+.env
+packages/server/.env
