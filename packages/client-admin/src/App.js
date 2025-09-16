@@ -1,16 +1,15 @@
 import React, { useState, useEffect } from "react";
+import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import LoginPage from "./pages/LoginPage";
 import DashboardPage from "./pages/DashboardPage";
+import RegisterAdmin from "./pages/RegisterAdmin";
 
 function App() {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
 
   useEffect(() => {
-    // Check if token exists in localStorage on load
     const token = localStorage.getItem("admin-token");
-    if (token) {
-      setIsAuthenticated(true);
-    }
+    if (token) setIsAuthenticated(true);
   }, []);
 
   const handleLogin = (token) => {
@@ -20,17 +19,18 @@ function App() {
 
   const handleLogout = () => {
     localStorage.removeItem("admin-token");
+    localStorage.removeItem("department");
     setIsAuthenticated(false);
   };
 
   return (
-    <div>
-      {isAuthenticated ? (
-        <DashboardPage onLogout={handleLogout} />
-      ) : (
-        <LoginPage onLogin={handleLogin} />
-      )}
-    </div>
+    <BrowserRouter>
+      <Routes>
+        <Route path="/" element={isAuthenticated ? <Navigate to="/dashboard" /> : <LoginPage onLogin={handleLogin} />} />
+        <Route path="/dashboard" element={isAuthenticated ? <DashboardPage onLogout={handleLogout} /> : <Navigate to="/" />} />
+        <Route path="/register-admin" element={isAuthenticated ? <RegisterAdmin /> : <Navigate to="/" />} />
+      </Routes>
+    </BrowserRouter>
   );
 }
 
