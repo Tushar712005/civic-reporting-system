@@ -22,3 +22,8 @@ lerna-debug.log*
 # NEVER commit this to a public repository.
 .env
 packages/server/.env
+# Python and AI specific ignores
+/ai-service/venv/
+/ai-service/env/
+/ai-service/__pycache__/
+/ai-service/*.pyc
