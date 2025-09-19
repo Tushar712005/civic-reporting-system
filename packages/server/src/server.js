@@ -12,8 +12,10 @@ const FormData = require('form-data');
 const { Parser } = require('json2csv');
 
 const app = express();
-const port = 5000;
-const JWT_SECRET = 'your-super-secret-key-that-should-be-in-an-env-file';
+const port = process.env.PORT || 5000;
+
+const JWT_SECRET = process.env.JWT_SECRET || "fallback-secret-key";
+
 
 // Multer (memory storage)
 const storage = multer.memoryStorage();
