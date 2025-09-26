@@ -27,3 +27,10 @@ packages/server/.env
 /ai-service/env/
 /ai-service/__pycache__/
 /ai-service/*.pyc
+node_modules
+node_modules
+node_modules
+node_modules
+node_modules
+node_modules
+node_modules

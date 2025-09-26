@@ -1,41 +1,80 @@
-// server.js
-const express = require('express');
-const cors = require('cors');
-const { Pool } = require('pg');
-const multer = require('multer');
-const path = require('path');
-const fs = require('fs');
-const bcrypt = require('bcryptjs');
-const jwt = require('jsonwebtoken');
-const axios = require('axios');
-const FormData = require('form-data');
-const { Parser } = require('json2csv');
+require("dotenv").config();
+const express = require("express");
+const cors = require("cors");
+const { Pool } = require("pg");
+const multer = require("multer");
+const path = require("path");
+const fs = require("fs");
+const bcrypt = require("bcryptjs");
+const jwt = require("jsonwebtoken");
+const http = require("http");
+const { Server } = require("socket.io");
+const webpush = require("web-push");
 
 const app = express();
 const port = 5000;
-const JWT_SECRET = 'your-super-secret-key-that-should-be-in-an-env-file';
+const JWT_SECRET = process.env.JWT_SECRET || "your-super-secret-key";
 
 // Multer (memory storage)
 const storage = multer.memoryStorage();
 const upload = multer({ storage });
 
-// Postgres pool — change connectionString if needed
+// Postgres pool
 const pool = new Pool({
-  connectionString: 'postgresql://postgres:123@localhost:5432/civic_db',
+  connectionString:
+    process.env.DATABASE_URL ||
+    "postgresql://postgres:Reddy@123@localhost:5432/civic_db",
 });
 
 app.use(cors());
 app.use(express.json());
 
 // Ensure uploads dir exists and serve it
-const uploadsDir = path.join(__dirname, '../uploads');
+const uploadsDir = path.join(__dirname, "../uploads");
 if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
-app.use('/uploads', express.static(uploadsDir));
+app.use("/uploads", express.static(uploadsDir));
 
-// Simple JWT auth middleware
+// ============================
+// Setup Socket.IO
+// ============================
+const server = http.createServer(app);
+const io = new Server(server, {
+  cors: {
+    origin: "http://localhost:3000", // React app
+    methods: ["GET", "POST", "PATCH"],
+    credentials: true,
+  },
+});
+
+io.on("connection", (socket) => {
+  console.log("User connected:", socket.id);
+
+  socket.on("register", (mobile) => {
+    if (!mobile) return;
+    const room = `mobile:${mobile}`;
+    socket.join(room);
+    console.log(`Mobile ${mobile} joined room ${room}`);
+  });
+
+  socket.on("disconnect", () => {
+    console.log("User disconnected:", socket.id);
+  });
+});
+
+// ============================
+// Web Push Config
+// ============================
+const publicVapidKey = process.env.VAPID_PUBLIC_KEY;
+const privateVapidKey = process.env.VAPID_PRIVATE_KEY;
+const vapidSubject =
+  process.env.VAPID_SUBJECT || "mailto:admin@example.com";
+
+webpush.setVapidDetails(vapidSubject, publicVapidKey, privateVapidKey);
+
+// ---------------- JWT auth middleware ----------------
 const authenticateToken = (req, res, next) => {
-  const authHeader = req.headers['authorization'];
-  const token = authHeader && authHeader.split(' ')[1];
+  const authHeader = req.headers["authorization"];
+  const token = authHeader && authHeader.split(" ")[1];
   if (!token) return res.sendStatus(401);
 
   jwt.verify(token, JWT_SECRET, (err, user) => {
@@ -45,246 +84,250 @@ const authenticateToken = (req, res, next) => {
   });
 };
 
-// Helper to map category input to canonical department
-function categoryToDepartment(category) {
-  const s = (category || '').toString().toLowerCase().trim();
-  if (['road', 'roads', 'pothole', 'potholes', 'road issue', 'road_issue'].includes(s)) {
-    return 'Public Works Department';
-  }
-  if (['electricity', 'electric', 'streetlight', 'street lights', 'street_light'].includes(s)) {
-    return 'Electricity Department';
-  }
-  if (['sanitation', 'garbage', 'waste', 'waste management'].includes(s)) {
-    return 'Sanitation Department';
-  }
-  if (['water', 'water supply', 'leak', 'leakage'].includes(s)) {
-    return 'Water Supply Department';
-  }
-  if (['general', 'other', 'misc', 'miscellaneous'].includes(s)) {
-    return 'General Administration';
-  }
-  // fallback: if it's already a department-like string, return title-case-ish
-  return category || 'General Administration';
-}
-
-// ---------------- Auth & Admin creation ----------------
-
-// Public register: only allowed when there are zero admins (first-time setup).
-// After the first admin exists, use the protected /api/admins route (Super Admin).
-app.post('/api/auth/register', async (req, res) => {
-  const { email, password, department } = req.body;
-  if (!email || !password) return res.status(400).json({ error: 'Email and password are required' });
-
-  try {
-    const { rows: countRows } = await pool.query('SELECT COUNT(*)::int AS c FROM admins;');
-    const adminCount = parseInt(countRows[0].c, 10);
-
-    if (adminCount > 0) {
-      return res.status(403).json({ error: 'Registration disabled. Use Super Admin to create accounts.' });
-    }
-
-    const dept = categoryToDepartment(department || 'ALL'); // for first admin you can set department 'ALL'
-    const salt = await bcrypt.genSalt(10);
-    const passwordHash = await bcrypt.hash(password, salt);
-    const insert = 'INSERT INTO admins (email, password_hash, department) VALUES ($1, $2, $3) RETURNING id, email, department;';
-    const { rows } = await pool.query(insert, [email, passwordHash, dept]);
-    res.status(201).json(rows[0]);
-  } catch (err) {
-    console.error('Registration error:', err);
-    if (err.code === '23505') return res.status(400).json({ error: 'Email already exists' });
-    res.status(500).json({ error: 'Internal Server Error' });
-  }
-});
-
-// Protected route for Super Admin to create admins
-app.post('/api/admins', authenticateToken, async (req, res) => {
-  try {
-    if (!req.user || req.user.department !== 'ALL') {
-      return res.status(403).json({ error: 'Only Super Admin can create admins' });
-    }
-
-    const { email, password, department } = req.body;
-    if (!email || !password || !department) {
-      return res.status(400).json({ error: 'Email, password, and department are required' });
-    }
-
-    const dept = categoryToDepartment(department);
-    const salt = await bcrypt.genSalt(10);
-    const passwordHash = await bcrypt.hash(password, salt);
-    const insert = 'INSERT INTO admins (email, password_hash, department) VALUES ($1, $2, $3) RETURNING id, email, department;';
-    const { rows } = await pool.query(insert, [email, passwordHash, dept]);
-    res.status(201).json(rows[0]);
-  } catch (err) {
-    console.error('Create admin error:', err);
-    if (err.code === '23505') return res.status(400).json({ error: 'Email already exists' });
-    res.status(500).json({ error: 'Internal Server Error' });
-  }
-});
-
-// Login
-app.post('/api/auth/login', async (req, res) => {
+// ---------------- Auth ----------------
+app.post("/api/auth/login", async (req, res) => {
   const { email, password } = req.body;
-  try {
-    const { rows } = await pool.query('SELECT * FROM admins WHERE email = $1;', [email]);
-    if (rows.length === 0) return res.status(400).json({ error: 'Invalid credentials' });
-    const user = rows[0];
-    const isMatch = await bcrypt.compare(password, user.password_hash);
-    if (!isMatch) return res.status(400).json({ error: 'Invalid credentials' });
+  if (!email || !password)
+    return res.status(400).json({ error: "Email and password required" });
 
-    const token = jwt.sign({ id: user.id, email: user.email, department: user.department }, JWT_SECRET, { expiresIn: '1h' });
-    res.json({ token, department: user.department });
+  try {
+    const { rows } = await pool.query(
+      "SELECT id, email, password_hash, department, role FROM admins WHERE email = $1",
+      [email.trim()]
+    );
+    if (!rows.length) return res.status(401).json({ error: "Invalid credentials" });
+
+    const admin = rows[0];
+    const match = await bcrypt.compare(password, admin.password_hash);
+    if (!match) return res.status(401).json({ error: "Invalid credentials" });
+
+    const token = jwt.sign(
+      { id: admin.id, email: admin.email, role: admin.role, department: admin.department },
+      JWT_SECRET,
+      { expiresIn: "1h" }
+    );
+
+    res.json({ token, department: admin.department, role: admin.role });
   } catch (err) {
-    console.error('Login error:', err);
-    res.status(500).json({ error: 'Internal Server Error' });
+    console.error("Login error:", err);
+    res.status(500).json({ error: "Internal Server Error" });
   }
 });
 
-// ---------------- Issues API ----------------
+// ---------------- Admin creation (superadmin only) ----------------
+app.post("/api/admins", authenticateToken, async (req, res) => {
+  const { email, password, department, role } = req.body;
+  if (req.user.role !== "superadmin")
+    return res.status(403).json({ error: "Only superadmins can create admins" });
 
-// Create issue (public PWA)
-app.post('/api/issues', upload.single('photo'), async (req, res) => {
+  if (!email || !password || !department || !role)
+    return res.status(400).json({ error: "Missing fields" });
+
   try {
-    const { title, category, latitude, longitude, mobile } = req.body;
-    const department = categoryToDepartment(category);
-
-    let imageUrl = null;
-    let priority = 'Medium';
-
-    if (req.file) {
-      // Try AI service to get priority
-      try {
-        const formData = new FormData();
-        formData.append('file', req.file.buffer, { filename: req.file.originalname });
-
-        const aiRes = await axios.post('http://127.0.0.1:5001/predict', formData, {
-          headers: formData.getHeaders(),
-          timeout: 15000,
-        });
-        if (aiRes && aiRes.data && aiRes.data.priority) priority = aiRes.data.priority;
-      } catch (err) {
-        console.warn('AI service unavailable or failed, using default priority. Error:', err.message || err);
-        priority = 'Medium';
-      }
-
-      // Save image to uploads
-      try {
-        const uniqueFilename = Date.now() + '-' + req.file.originalname;
-        const imagePath = path.join(uploadsDir, uniqueFilename);
-        fs.writeFileSync(imagePath, req.file.buffer);
-        imageUrl = `${req.protocol}://${req.get('host')}/uploads/${uniqueFilename}`;
-      } catch (fsErr) {
-        console.error('Failed to save uploaded file:', fsErr);
-      }
-    }
-
-    const insert = `INSERT INTO issues 
-      (title, status, "reportedAt", latitude, longitude, image_url, department, priority, mobile) 
-      VALUES ($1, 'New', NOW(), $2, $3, $4, $5, $6, $7) RETURNING *;`;
-    const { rows } = await pool.query(insert, [title, latitude, longitude, imageUrl, department, priority, mobile]);
+    const passwordHash = await bcrypt.hash(password, 10);
+    const insertQuery = `
+      INSERT INTO admins (email, password_hash, department, role)
+      VALUES ($1, $2, $3, $4)
+      RETURNING id, email, department, role;
+    `;
+    const { rows } = await pool.query(insertQuery, [email, passwordHash, department, role]);
     res.status(201).json(rows[0]);
   } catch (err) {
-    console.error('Insert issue error:', err);
-    res.status(500).json({ error: 'Internal Server Error' });
-  }
-});
-
-// Get issues (admin protected, filtered by department unless Super Admin)
-app.get('/api/issues', authenticateToken, async (req, res) => {
-  try {
-    const { department } = req.user;
-    let query = 'SELECT * FROM issues ORDER BY "reportedAt" DESC';
-    let params = [];
-    if (department && department !== 'ALL') {
-      query = 'SELECT * FROM issues WHERE department = $1 ORDER BY "reportedAt" DESC';
-      params = [department];
+    console.error("Create admin error:", err);
+    if (err.code === "23505") {
+      return res.status(400).json({ error: "Admin with this email already exists" });
     }
-    const { rows } = await pool.query(query, params);
-    res.json(rows);
-  } catch (err) {
-    console.error('Error fetching issues:', err);
-    res.status(500).json({ error: 'Internal Server Error' });
+    res.status(500).json({ error: "Internal Server Error" });
   }
 });
 
-// Update status (and set resolvedAt when resolved)
-app.patch('/api/issues/:id', authenticateToken, async (req, res) => {
+// ---------------- Create Issue ----------------
+app.post("/api/issues", upload.single("photo"), async (req, res) => {
+  try {
+    const { title, category, description, mobile, latitude, longitude } = req.body;
+    const issueDescription = description || title;
+
+    let aiResult = { department: category, priority: "Medium" };
+    try {
+      const response = await fetch("http://localhost:5001/predict", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ description: issueDescription }),
+      });
+      if (response.ok) {
+        const data = await response.json();
+        aiResult.department = data.department || category;
+        aiResult.priority = data.priority || "Medium";
+      }
+    } catch (err) {
+      console.error("AI service call failed:", err);
+    }
+
+    let photoPath = null;
+    if (req.file) {
+      const filename = Date.now() + path.extname(req.file.originalname);
+      photoPath = `/uploads/${filename}`;
+      fs.writeFileSync(path.join(uploadsDir, filename), req.file.buffer);
+    }
+
+    const insertQuery = `
+      INSERT INTO issues 
+        (title, department, priority, mobile, latitude, longitude, status, "reportedAt", image_url)
+      VALUES ($1,$2,$3,$4,$5,$6,'New',NOW(),$7)
+      RETURNING *;
+    `;
+    const values = [title, aiResult.department, aiResult.priority, mobile, latitude, longitude, photoPath];
+    const { rows } = await pool.query(insertQuery, values);
+
+    res.status(201).json(rows[0]);
+  } catch (err) {
+    console.error("Create issue error:", err);
+    res.status(500).json({ error: "Failed to create issue" });
+  }
+});
+
+// ---------------- Admin: List Issues ----------------
+app.get("/api/issues", authenticateToken, async (req, res) => {
+  try {
+    const { department, role } = req.user;
+    let query = 'SELECT * FROM issues ORDER BY "reportedAt" DESC';
+    const { rows } = await pool.query(query);
+    const filtered = role === "superadmin" ? rows : rows.filter((r) => r.department === department);
+    res.json(filtered);
+  } catch (err) {
+    console.error("Error fetching issues:", err);
+    res.status(500).json({ error: "Internal Server Error" });
+  }
+});
+
+// ---------------- Admin: Update Issue Status ----------------
+app.patch("/api/issues/:id", authenticateToken, async (req, res) => {
   try {
     const { id } = req.params;
     const { status } = req.body;
+    const updateQuery = `UPDATE issues SET status = $1 WHERE id = $2 RETURNING *;`;
+    const { rows } = await pool.query(updateQuery, [status, id]);
+    if (!rows.length) return res.status(404).json({ error: "Issue not found" });
 
-    let query, params;
-    if (status === 'Resolved') {
-      query = 'UPDATE issues SET status = $1, "resolvedAt" = NOW() WHERE id = $2 RETURNING *;';
-      params = [status, id];
-    } else {
-      query = 'UPDATE issues SET status = $1 WHERE id = $2 RETURNING *;';
-      params = [status, id];
+    const updatedIssue = rows[0];
+
+    // ✅ Notify citizen in real-time (socket.io)
+    io.to(`mobile:${updatedIssue.mobile}`).emit("statusUpdate", {
+      id: updatedIssue.id,
+      title: updatedIssue.title,
+      status: updatedIssue.status,
+      reportedAt: updatedIssue.reportedAt,
+    });
+
+    // ✅ Send web push if subscribed
+    try {
+      const subs = await pool.query(
+        "SELECT subscription FROM push_subscriptions WHERE mobile = $1",
+        [updatedIssue.mobile]
+      );
+      if (subs.rows.length) {
+        const subscription = subs.rows[0].subscription;
+        const payload = JSON.stringify({
+          title: "Report Update",
+          body: `"${updatedIssue.title}" is now ${updatedIssue.status}`,
+          url: "/track",
+        });
+        await webpush.sendNotification(subscription, payload);
+      }
+    } catch (err) {
+      console.error("Web Push error:", err);
     }
 
-    const { rows } = await pool.query(query, params);
-    if (rows.length === 0) return res.status(404).json({ error: 'Issue not found' });
-    res.json(rows[0]);
+    res.json(updatedIssue);
   } catch (err) {
-    console.error('Error updating issue:', err);
-    res.status(500).json({ error: 'Internal Server Error' });
+    console.error("Update status error:", err);
+    res.status(500).json({ error: "Failed to update status" });
   }
 });
 
-// Track by mobile (public)
-app.get('/api/issues/by-mobile/:mobile', async (req, res) => {
+// ---------------- Citizen: Track Reports ----------------
+app.get("/api/issues/track", async (req, res) => {
   try {
-    const { mobile } = req.params;
-    const { rows } = await pool.query('SELECT * FROM issues WHERE mobile = $1 ORDER BY "reportedAt" DESC', [mobile]);
+    const { mobile } = req.query;
+    if (!mobile) return res.status(400).json({ error: "Mobile number required" });
+    const query = `SELECT id, title, department, status, "reportedAt"
+                   FROM issues WHERE mobile = $1 ORDER BY "reportedAt" DESC`;
+    const { rows } = await pool.query(query, [mobile]);
+
+    const transformed = rows.map((r) => ({
+      ...r,
+      status: r.status === "New" ? "Pending" : r.status,
+    }));
+
+    res.json(transformed);
+  } catch (err) {
+    console.error("Track reports error:", err);
+    res.status(500).json({ error: "Internal Server Error" });
+  }
+});
+
+// ---------------- Feedback Endpoints ----------------
+// Create Feedback
+app.post("/api/feedback", async (req, res) => {
+  try {
+    const { reportId, message } = req.body;
+    if (!reportId || !message) {
+      return res.status(400).json({ error: "reportId and message required" });
+    }
+
+    const insertQuery = `
+      INSERT INTO feedback (report_id, message, created_at)
+      VALUES ($1, $2, NOW())
+      RETURNING *;
+    `;
+    const { rows } = await pool.query(insertQuery, [reportId, message]);
+    res.status(201).json(rows[0]);
+  } catch (err) {
+    console.error("Create feedback error:", err);
+    res.status(500).json({ error: "Failed to submit feedback" });
+  }
+});
+
+// Get Feedback for a Report
+app.get("/api/feedback/:reportId", async (req, res) => {
+  try {
+    const { reportId } = req.params;
+    const { rows } = await pool.query(
+      `SELECT * FROM feedback WHERE report_id = $1 ORDER BY created_at DESC`,
+      [reportId]
+    );
     res.json(rows);
   } catch (err) {
-    console.error('Error fetching issues by mobile:', err);
-    res.status(500).json({ error: 'Internal Server Error' });
+    console.error("Fetch feedback error:", err);
+    res.status(500).json({ error: "Failed to fetch feedback" });
   }
 });
 
-// ---------------- Analytics (Super Admin only) ----------------
+// ---------------- Web Push Endpoints ----------------
+app.get("/api/vapidPublicKey", (req, res) => {
+  res.send(publicVapidKey);
+});
 
-// Basic aggregated analytics
-app.get('/api/analytics/reports', authenticateToken, async (req, res) => {
+app.post("/api/subscribe", async (req, res) => {
   try {
-    if (!req.user || req.user.department !== 'ALL') return res.status(403).json({ error: 'Access denied' });
-
-    const query = `
-      SELECT 
-        COUNT(*) as total_reports,
-        COUNT(*) FILTER (WHERE status = 'Resolved') as resolved_reports,
-        AVG(EXTRACT(EPOCH FROM ("resolvedAt" - "reportedAt")) / 3600) as avg_resolution_hours
-      FROM issues;
-    `;
-    const { rows } = await pool.query(query);
-    res.json(rows[0] || {});
+    const { mobile, subscription } = req.body;
+    if (!mobile || !subscription) {
+      return res.status(400).json({ error: "mobile & subscription required" });
+    }
+    await pool.query(
+      `INSERT INTO push_subscriptions (mobile, subscription)
+       VALUES ($1, $2)
+       ON CONFLICT (mobile) DO UPDATE SET subscription = EXCLUDED.subscription, created_at = NOW()`,
+      [mobile, subscription]
+    );
+    res.status(201).json({ ok: true });
   } catch (err) {
-    console.error('Analytics error:', err);
-    res.status(500).json({ error: 'Internal Server Error' });
+    console.error("Subscribe error:", err);
+    res.status(500).json({ error: "Failed to subscribe" });
   }
 });
 
-// CSV download of issues (Super Admin only)
-app.get('/api/analytics/reports/download', authenticateToken, async (req, res) => {
-  try {
-    if (!req.user || req.user.department !== 'ALL') return res.status(403).json({ error: 'Access denied' });
-
-    const query = `SELECT id, title, status, department, priority, mobile, "reportedAt", "resolvedAt" FROM issues ORDER BY "reportedAt" DESC;`;
-    const { rows } = await pool.query(query);
-
-    const parser = new Parser();
-    const csv = parser.parse(rows || []);
-
-    res.header('Content-Type', 'text/csv');
-    res.attachment('reports.csv');
-    return res.send(csv);
-  } catch (err) {
-    console.error('Download error:', err);
-    res.status(500).json({ error: 'Internal Server Error' });
-  }
-});
-
-// Start server
-app.listen(port, () => {
-  console.log(`Server running at http://localhost:${port}`);
+// ---------------- Start Server ----------------
+server.listen(port, () => {
+  console.log(`✅ Server running at http://localhost:${port}`);
 });

@@ -6,7 +6,7 @@ const bcrypt = require('bcryptjs');
   try {
     // 👇 Update the connection string if needed (right now it's your DB settings)
     const pool = new Pool({
-      connectionString: 'postgresql://postgres:123@localhost:5432/civic_db'
+      connectionString: 'postgresql://postgres:Reddy@123@localhost:5432/civic_db'
     });
 
     // Defaults — you can override by passing arguments
