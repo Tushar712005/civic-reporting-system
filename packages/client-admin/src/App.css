@@ -36,3 +36,30 @@
     transform: rotate(360deg);
   }
 }
+
+/* -----------------------------
+   Leaflet Map Z-index Fixes
+   ----------------------------- */
+.leaflet-container {
+  position: relative;
+  z-index: 0;
+}
+
+.leaflet-popup {
+  z-index: 1500 !important;
+}
+
+.leaflet-tooltip {
+  z-index: 1600 !important;
+}
+
+.map-legend {
+  position: absolute;
+  bottom: 1rem;
+  left: 1rem;
+  background: rgba(255, 255, 255, 0.95);
+  padding: 0.75rem;
+  border-radius: 0.5rem;
+  box-shadow: 0 2px 6px rgba(0,0,0,0.2);
+  z-index: 2000;
+}
