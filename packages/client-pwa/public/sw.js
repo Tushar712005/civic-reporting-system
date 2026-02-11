@@ -1,11 +1,11 @@
 /* eslint-env serviceworker */
 /* eslint-disable no-restricted-globals */
-/* global  idb */
+/* global idb */
 
 // ✅ Service Worker with Push, Caching, and Background Sync
 
 // ========== 0. CONFIG ==========
-const STATIC_CACHE = "civic-static-v1";
+const STATIC_CACHE = "civic-static-v2"; // bump version to force update
 const API_CACHE = "civic-api-v1";
 const ASSETS_TO_CACHE = [
   "/",
@@ -24,12 +24,16 @@ const API_BASE_URL = new URL(API_BASE);
 
 // ========== 1. STATIC ASSET CACHING ==========
 self.addEventListener("install", (event) => {
+  console.log("[SW] Installing…");
   event.waitUntil(
     caches.open(STATIC_CACHE).then((cache) => cache.addAll(ASSETS_TO_CACHE))
   );
+  // Activate worker immediately after install
+  self.skipWaiting();
 });
 
 self.addEventListener("activate", (event) => {
+  console.log("[SW] Activating…");
   event.waitUntil(
     caches.keys().then((keys) =>
       Promise.all(
@@ -39,7 +43,7 @@ self.addEventListener("activate", (event) => {
       )
     )
   );
-  // self.clients.claim(); // optional
+  self.clients.claim();
 });
 
 // Helper: cache-first for static
@@ -91,6 +95,8 @@ self.addEventListener("fetch", (event) => {
 
 // ========== 2. PUSH NOTIFICATIONS ==========
 self.addEventListener("push", (event) => {
+  console.log("[SW] Push event received raw:", event.data ? event.data.text() : "(no data)");
+
   let data = {};
   try {
     data = event.data ? event.data.json() : {};
@@ -98,11 +104,14 @@ self.addEventListener("push", (event) => {
     data = { title: "Notification", body: event.data.text() };
   }
 
+  console.log("[SW] Parsed push data:", data);
+
   const title = data.title || "Notification";
   const options = {
     body: data.body || "You have a new update",
-    icon: "/icons/icon-192x192.png",
-    badge: "/icons/badge.png",
+    // use placeholder icons while testing to rule out broken paths
+    icon: "https://via.placeholder.com/128",
+    badge: "https://via.placeholder.com/32",
     data: { url: data.url || "/" },
   };
 
@@ -111,6 +120,7 @@ self.addEventListener("push", (event) => {
 
 // Handle notification click
 self.addEventListener("notificationclick", (event) => {
+  console.log("[SW] Notification click", event.notification.data);
   event.notification.close();
   const urlToOpen = event.notification.data?.url || "/";
 
@@ -136,7 +146,7 @@ self.addEventListener("notificationclick", (event) => {
 importScripts("https://cdn.jsdelivr.net/npm/idb@7/build/iife/index-min.js");
 
 async function openLocalDB() {
-  // Ensure the stores we need exist. (Dexie in the app may create more; that’s fine.)
+  // Ensure the stores we need exist.
   return idb.openDB("CivicAppDB", 1, {
     upgrade(db) {
       if (!db.objectStoreNames.contains("pendingReports")) {
@@ -168,9 +178,9 @@ async function syncReports() {
     try {
       await fetch(`${API_BASE}/api/issues`, { method: "POST", body: formData });
       await store.delete(report.id);
-      // console.log("✅ Synced report", report.id);
+      console.log("[SW] ✅ Synced report", report.id);
     } catch (err) {
-      // console.error("❌ Report sync failed", err);
+      console.error("[SW] ❌ Report sync failed", err);
     }
   }
   await tx.done;
@@ -191,9 +201,9 @@ async function syncFeedback() {
         body: JSON.stringify({ reportId: fb.reportId, message: fb.message }),
       });
       await store.delete(fb.id);
-      // console.log("✅ Synced feedback", fb.id);
+      console.log("[SW] ✅ Synced feedback", fb.id);
     } catch (err) {
-      // console.error("❌ Feedback sync failed", err);
+      console.error("[SW] ❌ Feedback sync failed", err);
     }
   }
   await tx.done;
@@ -201,6 +211,7 @@ async function syncFeedback() {
 
 // Listen for sync events
 self.addEventListener("sync", (event) => {
+  console.log("[SW] Sync event", event.tag);
   if (event.tag === "sync-reports") {
     event.waitUntil(syncReports());
   }
